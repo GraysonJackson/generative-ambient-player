@@ -1,215 +1,362 @@
-import { useState, useEffect, useRef } from "react";
-import * as Tone from "tone";
-import { Volume2, VolumeX } from "lucide-react";
-
-interface GeneratorParams {
-  tempo: number;
-  key: string;
-  density: number;
-}
-
-const SCALE_NOTES: Record<string, string[]> = {
-  C: ["C3", "D3", "E3", "F3", "G3", "A3", "B3"],
-  "C#": ["C#3", "D#3", "F3", "F#3", "G#3", "A#3", "C4"],
-  D: ["D3", "E3", "F#3", "G3", "A3", "B3", "C#4"],
-  "D#": ["D#3", "F3", "G3", "G#3", "A#3", "C4", "D4"],
-  E: ["E3", "F#3", "G#3", "A3", "B3", "C#4", "D#4"],
-  F: ["F3", "G3", "A3", "A#3", "C4", "D4", "E4"],
-  "F#": ["F#3", "G#3", "A#3", "B3", "C#4", "D#4", "F4"],
-  G: ["G3", "A3", "B3", "C4", "D4", "E4", "F#4"],
-  "G#": ["G#3", "A#3", "C4", "C#4", "D#4", "F4", "G4"],
-  A: ["A3", "B3", "C#4", "D4", "E4", "F#4", "G#4"],
-  "A#": ["A#3", "C4", "D4", "D#4", "F4", "G4", "A4"],
-  B: ["B3", "C#4", "D#4", "E4", "F#4", "G#4", "A#4"],
-};
-
-const KEYS = Object.keys(SCALE_NOTES);
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { SceneId, LayerState, RoomtonePreset } from './types/ambient';
+import { SCENES, SCENE_LIST } from './audio/scenes';
+import { RoomtoneAudioEngine } from './audio/engine';
+import { generateRandomSeed } from './audio/prng';
+import {
+  getStoredPresets,
+  savePresetToStorage,
+  deletePresetFromStorage,
+} from './storage/presets';
+import { OscilloscopeCanvas } from './components/OscilloscopeCanvas';
+import { MasterTransport } from './components/MasterTransport';
+import { SceneSelector } from './components/SceneSelector';
+import { LayerLane } from './components/LayerLane';
+import { PresetsBar } from './components/PresetsBar';
 
 export default function App() {
-  const [params, setParams] = useState<GeneratorParams>({
-    tempo: 120,
-    key: "C",
-    density: 0.5,
+  const [activeSceneId, setActiveSceneId] = useState<SceneId>('rain');
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [masterVolume, setMasterVolume] = useState<number>(0.35);
+  const [isStarting,setIsStarting]=useState(false);
+  const startPending=useRef(false);
+  const [tempo, setTempo] = useState<number>(72);
+  const [seed, setSeed] = useState<string>('#8f3a1c');
+
+  // Layer States for each layer: layer_1, layer_2, layer_3, layer_4
+  const [layerStates, setLayerStates] = useState<Record<string, LayerState>>(() => {
+    const initial: Record<string, LayerState> = {};
+    SCENES.rain.layers.forEach((l) => {
+      initial[l.id] = {
+        volume: l.defaultVolume,
+        muted: l.defaultMuted,
+        tone: l.defaultTone,
+      };
+    });
+    return initial;
   });
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const synthRef = useRef<Tone.PolySynth | null>(null);
-  const loopRef = useRef<Tone.Loop | null>(null);
-  const analyserRef = useRef<Tone.Analyser | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Live VU Meter levels (0.0 - 1.0)
+  const [meterLevels, setMeterLevels] = useState<Record<string, number>>({
+    layer_1: 0,
+    layer_2: 0,
+    layer_3: 0,
+    layer_4: 0,
+  });
+
+  // Presets State
+  const [presets, setPresets] = useState<RoomtonePreset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState<string>('rt_rain_01');
+  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+
+  // Audio Engine Instance
+  const engineRef = useRef<RoomtoneAudioEngine | null>(null);
   const animFrameRef = useRef<number>(0);
 
+  // Initialize presets on mount
   useEffect(() => {
-    const synth = new Tone.PolySynth().toDestination();
-    const analyser = new Tone.Analyser("waveform", 256);
-    synth.connect(analyser);
-    synthRef.current = synth;
-    analyserRef.current = analyser;
-
-    function drawWaveform() {
-      if (!canvasRef.current || !analyserRef.current) {
-        animFrameRef.current = requestAnimationFrame(drawWaveform);
-        return;
-      }
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      const width = canvas.width;
-      const height = canvas.height;
-      const values = analyserRef.current.getValue() as Float32Array;
-      ctx.clearRect(0, 0, width, height);
-      ctx.beginPath();
-      ctx.strokeStyle = "#818cf8";
-      ctx.lineWidth = 1.5;
-      for (let i = 0; i < values.length; i++) {
-        const x = (i / values.length) * width;
-        const y = ((values[i] as number) + 1) / 2 * height;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-      animFrameRef.current = requestAnimationFrame(drawWaveform);
+    const loaded = getStoredPresets();
+    setPresets(loaded);
+    if (loaded.length > 0) {
+      setSelectedPresetId(loaded[0].id);
     }
-    drawWaveform();
+  }, []);
 
+  // Initialize engine reference lazily
+  if (!engineRef.current) {
+    engineRef.current = new RoomtoneAudioEngine();
+  }
+
+  // Component unmount cleanup: ensures zero orphaned Web Audio nodes or runaway loops
+  useEffect(() => {
+    const engine = engineRef.current;
     return () => {
       cancelAnimationFrame(animFrameRef.current);
-      loopRef.current?.stop();
-      loopRef.current?.dispose();
-      synth.dispose();
-      analyser.dispose();
+      if (engine) {
+        engine.dispose();
+      }
     };
   }, []);
 
+  // Live Signal Meter animation loop
   useEffect(() => {
-    if (!isPlaying || !synthRef.current) return;
-    const notes = SCALE_NOTES[params.key] || SCALE_NOTES.C;
-    let step = 0;
-    const pattern: (string | null)[] = [];
-    for (let i = 0; i < 16; i++) {
-      pattern.push(
-        Math.random() < params.density
-          ? notes[Math.floor(Math.random() * notes.length)]
-          : null
-      );
-    }
-    loopRef.current?.stop();
-    loopRef.current?.dispose();
-    const loop = new Tone.Loop((time) => {
-      const note = pattern[step % pattern.length];
-      if (note && synthRef.current) {
-        synthRef.current.triggerAttackRelease(note, "8n", time, 0.6);
+    let lastUpdate=0;
+    function updateMeters(time=0) {
+      if (!isPlaying || document.hidden) return;
+      if (time-lastUpdate>66) {
+        lastUpdate=time;
+        setMeterLevels(Object.fromEntries(['layer_1','layer_2','layer_3','layer_4'].map(id=>[id,engineRef.current?.getLayerMeterLevel(id)||0])));
       }
-      step++;
-    }, "8n").start(0);
-    Tone.Transport.bpm.value = params.tempo;
-    Tone.Transport.start();
-    loopRef.current = loop;
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) animFrameRef.current=requestAnimationFrame(updateMeters);
+    }
+    function resume(){cancelAnimationFrame(animFrameRef.current);if(isPlaying&&!document.hidden)updateMeters();}
+    document.addEventListener('visibilitychange',resume);
+    if(isPlaying) updateMeters(); else setMeterLevels({layer_1:0,layer_2:0,layer_3:0,layer_4:0});
+    return ()=>{cancelAnimationFrame(animFrameRef.current);document.removeEventListener('visibilitychange',resume);};
+  }, [isPlaying]);
 
-    return () => {
-      loop.stop();
-      loop.dispose();
-      Tone.Transport.stop();
-      synthRef.current?.releaseAll();
+  // Master Play / Stop toggle
+  const togglePlay = async () => {
+    const engine=engineRef.current;
+    if(!engine||startPending.current)return;
+    if(isPlaying){engine.stopAudio();setIsPlaying(false);return;}
+    startPending.current=true;setIsStarting(true);
+    try{engine.setMasterVolume(masterVolume);await engine.startAudio(activeSceneId,seed,layerStates,tempo);setIsPlaying(true);}
+    catch{engine.stopAudio();setIsPlaying(false);showFeedback('Audio could not start. Check browser sound permissions, then try Play again.');}
+    finally{startPending.current=false;setIsStarting(false);}
+  };
+
+  // Scene Switching: Idempotent teardown without audio stacking
+  const handleSelectScene = (newSceneId: SceneId) => {
+    setActiveSceneId(newSceneId);
+    const newConfig = SCENES[newSceneId];
+    if (!newConfig) return;
+
+    // Reset default layer states for the new scene
+    const newLayers: Record<string, LayerState> = {};
+    newConfig.layers.forEach((l) => {
+      newLayers[l.id] = {
+        volume: l.defaultVolume,
+        muted: l.defaultMuted,
+        tone: l.defaultTone,
+      };
+    });
+    setLayerStates(newLayers);
+    setTempo(newConfig.defaultTempo);
+
+    if (engineRef.current) {
+      engineRef.current.switchScene(newSceneId, seed, newLayers, newConfig.defaultTempo);
+    }
+  };
+
+  // Reseed Mulberry32 deterministic engine
+  const handleReseed = () => {
+    const newSeed = generateRandomSeed();
+    setSeed(newSeed);
+    if (engineRef.current) {
+      engineRef.current.reseed(newSeed, layerStates);
+    }
+  };
+
+  // Master Volume handler
+  const handleMasterVolumeChange = (vol: number) => {
+    setMasterVolume(vol);
+    if (engineRef.current) {
+      engineRef.current.setMasterVolume(vol);
+    }
+  };
+
+  // Tempo BPM handler
+  const handleTempoChange = (bpm: number) => {
+    setTempo(bpm);
+    if (engineRef.current) {
+      engineRef.current.setTempo(bpm);
+    }
+  };
+
+  // Layer Update handler (faders, knobs, mute)
+  const handleUpdateLayer = (layerId: string, updatedState: LayerState) => {
+    const updated = { ...layerStates, [layerId]: updatedState };
+    setLayerStates(updated);
+    if (engineRef.current) {
+      engineRef.current.updateLayer(layerId, updatedState);
+    }
+  };
+
+  // Waveform Getter for CRT Canvas
+  const getMasterWaveform = useCallback(() => {
+    if (engineRef.current) {
+      return engineRef.current.getMasterWaveform();
+    }
+    return new Float32Array(256);
+  }, []);
+
+  // Save Current Preset
+  const handleSavePreset = (name: string) => {
+    const newPreset: RoomtonePreset = {
+      id: `rt_custom_${Date.now()}`,
+      name,
+      sceneId: activeSceneId,
+      seed,
+      tempo,
+      masterVolume,
+      layers: { ...layerStates },
+      updatedAt: Date.now(),
     };
-  }, [isPlaying, params]);
+    let updatedList:RoomtonePreset[];
+    try{updatedList=savePresetToStorage(newPreset);}catch{showFeedback("Browser storage is unavailable. Preset was not saved.");return;}
+    setPresets(updatedList);
+    setSelectedPresetId(newPreset.id);
+    showFeedback('Preset saved on this browser.');
+  };
 
-  function togglePlay() {
-    setIsPlaying((p) => !p);
-  }
+  // Restore Preset: Updates settings but does NOT start playback automatically
+  const handleRestorePreset = () => {
+    const target = presets.find((p) => p.id === selectedPresetId);
+    if (!target) return;
 
-  function toggleMute() {
-    Tone.Destination.mute = !Tone.Destination.mute;
-    setIsMuted((m) => !m);
-  }
+    setActiveSceneId(target.sceneId);
+    setSeed(target.seed);
+    setTempo(target.tempo);
+    setMasterVolume(target.masterVolume);
+    setLayerStates(target.layers);
 
-  function handleParamChange(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
-    const { name, value } = e.target;
-    setParams((prev) => ({
-      ...prev,
-      [name]: name === "key" ? value : parseFloat(value),
-    }));
-  }
+    if (engineRef.current) {
+      engineRef.current.setMasterVolume(target.masterVolume);
+      engineRef.current.setTempo(target.tempo);
+      // If currently playing, update running scene and layers without restarting
+      if (isPlaying) {
+        engineRef.current.switchScene(target.sceneId, target.seed, target.layers, target.tempo);
+      }
+    }
+
+    showFeedback(`Preset "${target.name}" restored (playback untouched)`);
+  };
+
+  // Delete Preset
+  const handleDeletePreset = (id: string) => {
+    const target = presets.find((p) => p.id === id);
+    let updatedList:RoomtonePreset[];
+    try{updatedList=deletePresetFromStorage(id);}catch{showFeedback("Browser storage is unavailable. Preset was not deleted.");return;}
+    setPresets(updatedList);
+    if (updatedList.length > 0) {
+      setSelectedPresetId(updatedList[0].id);
+    }
+    showFeedback(`Preset "${target?.name || id}" deleted`);
+  };
+
+  const showFeedback = (msg: string) => {
+    setFeedbackMessage(msg);
+    setTimeout(() => {
+      setFeedbackMessage(null);
+    }, 3500);
+  };
+
+  const activeSceneConfig = SCENES[activeSceneId] || SCENES.rain;
 
   return (
-    <div className="min-h-screen bg-[#0a0f1a] text-white p-8 font-mono">
-      <div className="max-w-4xl mx-auto">
-        <h1 className="text-2xl tracking-tight mb-2">Generative Ambient Player</h1>
-        <p className="text-gray-500 text-sm mb-8">all audio generated in-browser via Tone.js — no samples needed</p>
+    <div className="min-h-screen bg-[#e8ebe4] text-[#243629] flex flex-col items-center py-6 px-3 sm:px-6">
+      {/* 19-inch Studio Audio Rack Container */}
+      <div className="w-full max-w-[1360px] bg-[#f7f7f1] border-2 sm:border-[3px] border-[#b3c2af] rounded-lg shadow-[0_20px_50px_rgba(0,0,0,0.9),inset_0_2px_4px_rgba(255,255,255,0.05)] relative flex">
+        {/* Left Rack Ear (Hidden on mobile) */}
+        <div className="hidden md:flex w-9 bg-[#d4dfd2] border-r-2 border-black flex-col justify-between py-6 items-center shrink-0">
+          <div className="hex-screw" />
+          <div className="hex-screw" />
+          <div className="hex-screw" />
+          <div className="hex-screw" />
+        </div>
 
-        <div className="mb-8 border border-gray-800 rounded-lg overflow-hidden">
-          <canvas
-            ref={canvasRef}
-            width={800}
-            height={200}
-            className="w-full h-48 bg-[#0d1220]"
+        {/* Main Rack Faceplate */}
+        <div className="flex-1 p-4 sm:p-6 lg:p-7 flex flex-col gap-5 overflow-hidden">
+          {/* Rack Top Strip */}
+          <div className="flex flex-wrap justify-between items-center border-b-2 border-[#85977f] pb-3.5 gap-2">
+            <div className="flex items-baseline gap-3">
+              <span className="font-display text-2xl sm:text-3xl text-[#2d6659] tracking-widest drop-shadow-[0_0_12px_rgba(6,182,212,0.6)]">
+                Roomtone
+              </span>
+              <span className="font-mono-tech text-xs sm:text-xs text-[#98502e] tracking-wider uppercase">
+                Soundscapes for work and tabletop sessions
+              </span>
+            </div>
+            <div className="flex items-center gap-4 font-mono-tech text-xs">
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-[#356b44] shadow-[0_0_6px_#356b44]" />
+                <span className="text-[#4a6049]">Ready to play</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div
+                  className={`w-2 h-2 rounded-full transition-colors ${
+                    isPlaying
+                      ? 'bg-[#356b44] shadow-[0_0_8px_#356b44]'
+                      : 'bg-[#85977f]'
+                  }`}
+                />
+                <span className={isPlaying ? 'text-[#356b44]' : 'text-[#52684e]'}>
+                  Audio {isPlaying ? 'ACTIVE' : 'IDLE'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Top Matrix: CRT Oscilloscope & Master Controls */}
+          <div className="grid grid-cols-1 lg:grid-cols-[540px_1fr] gap-5 items-stretch">
+            {/* CRT Oscilloscope Screen */}
+            <OscilloscopeCanvas
+              getWaveform={getMasterWaveform}
+              isRunning={isPlaying}
+            />
+
+            {/* Master Controls & PRNG Engine */}
+            <MasterTransport
+              isRunning={isPlaying}
+              isStarting={isStarting}
+              onTogglePlay={togglePlay}
+              masterVolume={masterVolume}
+              onMasterVolumeChange={handleMasterVolumeChange}
+              tempo={tempo}
+              onTempoChange={handleTempoChange}
+              seed={seed}
+              onReseed={handleReseed}
+            />
+          </div>
+
+          {/* 4 Launch Scene Selector Tabs */}
+          <SceneSelector
+            scenes={SCENE_LIST}
+            activeSceneId={activeSceneId}
+            onSelectScene={handleSelectScene}
+          />
+
+          {/* 4 Independent Layer Lanes */}
+          <div className="bg-[#f0f2e9] border-2 border-[#85977f] rounded-md p-4 sm:p-5 flex flex-col gap-3 shadow-md">
+            <div className="flex justify-between items-center">
+              <span className="font-mono-tech text-xs text-[#98502e] tracking-wider uppercase font-semibold">
+                Layer mixer (scene:{' '}
+                <span className="text-[#356b44]">{activeSceneConfig.name}</span>)
+              </span>
+              <span className="font-mono-tech text-xs text-[#52684e]">
+                Four independent layers
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5 mt-1">
+              {activeSceneConfig.layers.map((layerConfig) => {
+                const state = layerStates[layerConfig.id] || {
+                  volume: layerConfig.defaultVolume,
+                  muted: layerConfig.defaultMuted,
+                  tone: layerConfig.defaultTone,
+                };
+                return (
+                  <LayerLane
+                    key={layerConfig.id}
+                    config={layerConfig}
+                    state={state}
+                    meterLevel={meterLevels[layerConfig.id] || 0}
+                    onUpdate={(updated) => handleUpdateLayer(layerConfig.id, updated)}
+                  />
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Bottom Preset Persistence Bar */}
+          <PresetsBar
+            presets={presets}
+            selectedPresetId={selectedPresetId}
+            onSelectPreset={setSelectedPresetId}
+            onSaveCurrent={handleSavePreset}
+            onRestore={handleRestorePreset}
+            onDelete={handleDeletePreset}
+            feedbackMessage={feedbackMessage}
           />
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-8">
-          <div className="border border-gray-800 rounded-lg p-4">
-            <label className="block text-xs uppercase tracking-widest text-gray-500 mb-3">Tempo</label>
-            <input
-              type="range"
-              name="tempo"
-              min="60"
-              max="180"
-              value={params.tempo}
-              onChange={handleParamChange}
-              className="w-full accent-indigo-400"
-            />
-            <div className="text-right text-sm text-gray-400 mt-1">{params.tempo} BPM</div>
-          </div>
-
-          <div className="border border-gray-800 rounded-lg p-4">
-            <label className="block text-xs uppercase tracking-widest text-gray-500 mb-3">Key</label>
-            <select
-              name="key"
-              value={params.key}
-              onChange={handleParamChange}
-              className="w-full bg-[#0d1220] border border-gray-700 rounded px-3 py-2 text-sm"
-            >
-              {KEYS.map((k) => (
-                <option key={k} value={k}>{k}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="border border-gray-800 rounded-lg p-4">
-            <label className="block text-xs uppercase tracking-widest text-gray-500 mb-3">Density</label>
-            <input
-              type="range"
-              name="density"
-              min="0"
-              max="1"
-              step="0.1"
-              value={params.density}
-              onChange={handleParamChange}
-              className="w-full accent-indigo-400"
-            />
-            <div className="text-right text-sm text-gray-400 mt-1">{(params.density * 100).toFixed(0)}%</div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-4">
-          <button
-            onClick={togglePlay}
-            className="bg-indigo-500 hover:bg-indigo-400 text-white px-6 py-3 rounded-full text-sm font-medium tracking-wide transition-colors"
-          >
-            {isPlaying ? "Stop" : "Start Generative Loop"}
-          </button>
-          <button
-            onClick={toggleMute}
-            className="border border-gray-700 hover:border-gray-500 p-3 rounded-full transition-colors"
-            aria-label={isMuted ? "Unmute" : "Mute"}
-          >
-            {isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
-          </button>
-        </div>
-
-        <div className="mt-12 text-xs text-gray-600 max-w-md">
-          <p className="mb-2">Adjust tempo, key, and note density to shape the evolving pattern. Each time you start the loop, a new 16-step sequence is generated based on your current settings.</p>
-          <p>Canvas visualization renders the live waveform from the Web Audio API AnalyserNode in real time.</p>
+        {/* Right Rack Ear (Hidden on mobile) */}
+        <div className="hidden md:flex w-9 bg-[#d4dfd2] border-l-2 border-black flex-col justify-between py-6 items-center shrink-0">
+          <div className="hex-screw" />
+          <div className="hex-screw" />
+          <div className="hex-screw" />
+          <div className="hex-screw" />
         </div>
       </div>
     </div>

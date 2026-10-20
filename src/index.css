@@ -1,1 +1,98 @@
 @import "tailwindcss";
+
+:root {
+  --rack-chassis: #f7f7f1;
+  --rack-panel: #f0f2e9;
+  --rack-metal: #1f293d;
+  --rack-border: #85977f;
+  --crt-screen: #172b20;
+  --crt-glow: #356b44;
+  --crt-cyan: #2d6659;
+  --amber-led: #98502e;
+  --amber-glow: rgba(245, 158, 11, 0.2);
+  --red-led: #ef4444;
+  --text-rack: #243629;
+  --text-dim: #52684e;
+  --font-display: "VT323", monospace;
+  --font-mono: "Share Tech Mono", monospace;
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background-color: #e8ebe4;
+  color: var(--text-rack);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-mono-tech {
+  font-family: var(--font-mono);
+}
+
+/* CRT Screen Scanlines */
+.crt-scanlines {
+  position: relative;
+  overflow: hidden;
+}
+
+.crt-scanlines::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.28) 0px,
+    rgba(0, 0, 0, 0.28) 2px,
+    transparent 2px,
+    transparent 4px
+  );
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Hex Screw */
+.hex-screw {
+  width: 14px;
+  height: 14px;
+  background: radial-gradient(circle, #52684e 30%, #b3c2af 90%);
+  border-radius: 50%;
+  border: 1px solid #0f172a;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.4), 0 2px 4px #000;
+  position: relative;
+}
+
+.hex-screw::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  right: 2px;
+  height: 2px;
+  background: #000;
+  transform: translateY(-50%) rotate(45deg);
+}
+
+/* Custom Scrollbar for rack aesthetics */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #f7f7f1;
+}
+::-webkit-scrollbar-thumb {
+  background: #b3c2af;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #85977f;
+}
+
+body{background:#e8ebe4;color:#243629;font-family:system-ui,sans-serif}.font-display{font-family:system-ui,sans-serif!important;letter-spacing:0!important}.font-mono-tech{font-family:system-ui,sans-serif!important;font-size:12px}button,input,select{min-height:36px}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #00719a;outline-offset:3px}.hex-screw{visibility:hidden}.crt-scanlines:after{display:none}@media(max-width:640px){button{min-height:44px}}
+
+.crt-scanlines::before{display:none}

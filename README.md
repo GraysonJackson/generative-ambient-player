@@ -1,29 +1,19 @@
-# Generative Ambient Player
- Retro-futurism synthwave-adjacent generative ambient music player. Deep navy canvas, thin glowing line-art, CRT-scanline texture applied subtly. Monospace numerals for timestamps and frequencies.
+# Roomtone
 
-[Live Demo](https://graysonjackson.github.io/generative-ambient-player/)
+A browser soundscape instrument with four scenes, independent layer volume/tone/mute controls, reproducible note-event plans, and locally saved presets.
 
-## What It Does 
-Adjust parameters tempo, key, density feed generative algorithm produces evolving ambient loop. Canvas-based waveform/oscilloscope visualization synced actual audio output. 
-## Design Decisions 
-Retro-futurism vibe restrained not neon overload, more 1980s scientific instrument. Monospace numerals for timestamps and frequencies. Controls are physical-metaphor dials (rotate-to-adjust), not sliders - deliberate, slightly risky interaction choice. 
-## Tech Stack
-**React** - Core framework
- **Tone.js** - Audio synthesis
-  **Web Audio API** - Real-time audio processing
-   **Canvas API** - Waveform visualization ## Getting Started
+[Open Roomtone](https://graysonjackson.github.io/generative-ambient-player/)
 
-```bash
-npm install
-npm run dev
+```sh
+npm ci
+npm test
+npm run typecheck
+npm run build
+npm run preview
 ```
 
+Use Node 24. The Vite build emits `out/` and uses `/generative-ambient-player/`. GitHub Actions publishes that static artifact.
 
-Open [http://localhost:3000](http://localhost:3000).
+Audio starts from a user gesture. Gain changes ramp, the master path is limited, and Stop releases sound and silences the master. The same seed/configuration repeats the logical event plan; stochastic noise and browser audio rendering are not promised to be bit-identical. Presets are validated before loading and never restore playback state.
 
-## Build
-
-
-```bash
-npm run build
-npm start
+Unit tests cover the event planner, scene configuration, preset behavior, and basic lifecycle methods. Real browser checks are also needed to establish audio startup and cleanup. No generated images or external music recordings are used. Tone.js synthesizes the audio locally.
